@@ -5,6 +5,7 @@ from aws_cdk import (
     Duration,
     RemovalPolicy,
     CfnOutput,
+    CfnParameter, 
     aws_iam as iam,
     aws_lambda as _lambda,
     aws_apigateway as apigateway,
@@ -21,10 +22,17 @@ class InvestmentAgentSystemStack(Stack):
     def __init__(self, scope: Construct, construct_id: str, **kwargs) -> None:
         super().__init__(scope, construct_id, **kwargs)
 
+        # Parameter to accept the ID of the manually created Knowledge Base
+        knowledge_base_id = CfnParameter(
+            self, "KnowledgeBaseId",
+            type="String",
+            description="The ID of the manually created Bedrock Knowledge Base."
+        ).value_as_string
+
         # S3 Bucket for PDS documents
         pds_bucket = s3.Bucket(
             self, "PdsDocumentsBucket",
-            versioned=True,
+            versioned=False, # Versioning is now turned off
             removal_policy=RemovalPolicy.DESTROY,
             auto_delete_objects=True,
             block_public_access=s3.BlockPublicAccess.BLOCK_ALL
@@ -37,7 +45,13 @@ class InvestmentAgentSystemStack(Stack):
         )
         agent_execution_role.add_to_policy(iam.PolicyStatement(
             actions=["bedrock:InvokeModel"],
-            resources=[f"arn:aws:bedrock:{self.region}::foundation-model/amazon.titan-text-express-v1"]
+            resources=[f"arn:aws:bedrock:{self.region}::foundation-model/amazon.nova-micro-v1:0"]
+        ))
+
+        # Grant the agent role permission to retrieve from the manually created KB
+        agent_execution_role.add_to_policy(iam.PolicyStatement(
+            actions=["bedrock:Retrieve"],
+            resources=[f"arn:aws:bedrock:{self.region}:{self.account}:knowledge-base/{knowledge_base_id}"]
         ))
 
         # Bedrock Agents
@@ -45,7 +59,7 @@ class InvestmentAgentSystemStack(Stack):
             self, "PersonalizedInfoAgent",
             agent_name="Personalized-Information-Agent",
             agent_resource_role_arn=agent_execution_role.role_arn,
-            foundation_model="amazon.titan-text-express-v1",
+            foundation_model="amazon.nova-micro-v1:0",
             instruction="You provide personalized financial information based on the user's query. State clearly this is not advice and you cannot access their account.",
         )
 
@@ -53,8 +67,11 @@ class InvestmentAgentSystemStack(Stack):
             self, "GeneralAdviceAgent",
             agent_name="General-Advice-Agent",
             agent_resource_role_arn=agent_execution_role.role_arn,
-            foundation_model="amazon.titan-text-express-v1",
-            # instruction="You provide general financial education. Answer questions about market concepts and products. Always include a disclaimer that this is not personal advice.",
+            foundation_model="amazon.nova-micro-v1:0",
+            knowledge_bases=[bedrock.CfnAgent.AgentKnowledgeBaseProperty(
+                knowledge_base_id=knowledge_base_id,
+                description="Contains Product Disclosure Statements (PDS) for Vanguard Australia products."
+            )],
             instruction=""" You are an expert AI assistant representing Vanguard Investments Australia. Your primary role is to provide factual, educational information and general financial advice to clients based strictly on official Vanguard documentation.
 
                             **Core Directives:**
@@ -85,7 +102,7 @@ class InvestmentAgentSystemStack(Stack):
             self, "OrchestratorAgent",
             agent_name="Investment-Orchestrator-Agent",
             agent_resource_role_arn=agent_execution_role.role_arn,
-            foundation_model="amazon.titan-text-express-v1",
+            foundation_model="amazon.nova-micro-v1:0",
             instruction=f"""
                 You are a master financial query orchestrator. Your job is to route queries to the correct specialist.
                 - If a query is about general market concepts... you must invoke the '{general_agent.agent_name}' agent to get the answer.
@@ -99,6 +116,15 @@ class InvestmentAgentSystemStack(Stack):
             resources=[personalized_agent.attr_agent_arn, general_agent.attr_agent_arn]
         ))
         
+        # --- THE FIX ---
+        # Explicitly define the Log Group for the Lambda function to prevent conflicts
+        invoke_agent_log_group = logs.LogGroup(
+            self, "InvokeAgentLambdaLogGroup",
+            # A unique but predictable name for the log group
+            log_group_name=f"/aws/lambda/{self.stack_name}-InvokeAgentLambda",
+            removal_policy=RemovalPolicy.DESTROY
+        )
+        
         # API Entrypoint Lambda
         invoke_agent_lambda = PythonFunction(
             self, "InvokeAgentLambda",
@@ -111,13 +137,14 @@ class InvestmentAgentSystemStack(Stack):
             environment={
                 "ORCHESTRATOR_AGENT_ID": orchestrator_agent.attr_agent_id,
                 "ORCHESTRATOR_AGENT_ALIAS_ID": "PLACEHOLDER"
-            }
+            },
+            # Associate the explicitly created log group
+            log_group=invoke_agent_log_group
         )
         
-        invoke_agent_lambda.add_to_role_policy(iam.PolicyStatement(
+        invoke_agent_lambda.role.add_to_policy(iam.PolicyStatement(
             actions=["bedrock:InvokeAgent"],
             resources=[
-                orchestrator_agent.attr_agent_arn,
                 f"arn:aws:bedrock:{self.region}:{self.account}:agent-alias/{orchestrator_agent.attr_agent_id}/*"
             ]
         ))
@@ -147,7 +174,7 @@ class InvestmentAgentSystemStack(Stack):
         
         # Outputs
         CfnOutput(self, "ApiEndpointUrl", value=api.url)
-        CfnOutput(self, "PdsBucketName", value=pds_bucket.bucket_name) # Typo fixed here
+        CfnOutput(self, "PdsBucketName", value=pds_bucket.bucket_name)
         CfnOutput(self, "ApiKeyId",
             value=api_key.key_id,
             description="The ID of the API Key to use for requests"
