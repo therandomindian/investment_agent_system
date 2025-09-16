@@ -98,23 +98,138 @@ class InvestmentAgentSystemStack(Stack):
                             """,
         )
 
+        # Create Lambda functions for agent routing
+        personalized_router_lambda = PythonFunction(
+            self, "PersonalizedRouterLambda",
+            entry="lambda/agent_router",
+            index="personalized_router.py",
+            handler="handler",
+            runtime=_lambda.Runtime.PYTHON_3_11,
+            architecture=Architecture.ARM_64,
+            timeout=Duration.seconds(90),
+            environment={
+                "AGENT_ID": personalized_agent.attr_agent_id,
+                "AGENT_ALIAS_ID": "TSTALIASID"  # Default test alias
+            }
+        )
+        
+        general_router_lambda = PythonFunction(
+            self, "GeneralRouterLambda", 
+            entry="lambda/agent_router",
+            index="general_router.py",
+            handler="handler",
+            runtime=_lambda.Runtime.PYTHON_3_11,
+            architecture=Architecture.ARM_64,
+            timeout=Duration.seconds(90),
+            environment={
+                "AGENT_ID": general_agent.attr_agent_id,
+                "AGENT_ALIAS_ID": "TSTALIASID"  # Default test alias
+            }
+        )
+        
+        # Grant Lambda functions permission to invoke agents
+        personalized_router_lambda.role.add_to_policy(iam.PolicyStatement(
+            actions=["bedrock:InvokeAgent"],
+            resources=[f"arn:aws:bedrock:{self.region}:{self.account}:agent-alias/{personalized_agent.attr_agent_id}/*"]
+        ))
+        
+        general_router_lambda.role.add_to_policy(iam.PolicyStatement(
+            actions=["bedrock:InvokeAgent"],
+            resources=[f"arn:aws:bedrock:{self.region}:{self.account}:agent-alias/{general_agent.attr_agent_id}/*"]
+        ))
+
         orchestrator_agent = bedrock.CfnAgent(
             self, "OrchestratorAgent",
             agent_name="Investment-Orchestrator-Agent",
             agent_resource_role_arn=agent_execution_role.role_arn,
             foundation_model="amazon.nova-micro-v1:0",
-            instruction=f"""
-                You are a master financial query orchestrator. Your job is to route queries to the correct specialist.
-                - If a query is about general market concepts... you must invoke the '{general_agent.agent_name}' agent to get the answer.
-                - If a query is personal... you must invoke the '{personalized_agent.agent_name}' agent to get the answer.
-                - Respond only with the answer you receive from the specialist agent.
-            """
+            instruction="""
+                You are a master financial query orchestrator. Your job is to route queries to the correct specialist agent.
+                
+                You have access to two functions:
+                - invoke_personalized_agent: Use this for personal financial questions, account-specific queries, or questions about the user's individual situation
+                - invoke_general_agent: Use this for general market information, product explanations, or educational content about investments
+                
+                Analyze the user's query and determine which agent would be most appropriate. Then call the corresponding function with the user's query.
+                Return only the response from the specialist agent.
+            """,
+            action_groups=[
+                bedrock.CfnAgent.AgentActionGroupProperty(
+                    action_group_name="PersonalizedAgentInvoker",
+                    action_group_executor=bedrock.CfnAgent.ActionGroupExecutorProperty(
+                        lambda_=personalized_router_lambda.function_arn
+                    ),
+                    function_schema=bedrock.CfnAgent.FunctionSchemaProperty(
+                        functions=[
+                            bedrock.CfnAgent.FunctionProperty(
+                                name="invoke_personalized_agent",
+                                description="Invoke the personalized information agent for personal financial queries",
+                                parameters={
+                                    "query": bedrock.CfnAgent.ParameterDetailProperty(
+                                        description="The user's query to send to the personalized agent",
+                                        required=True,
+                                        type="string"
+                                    )
+                                }
+                            )
+                        ]
+                    )
+                ),
+                bedrock.CfnAgent.AgentActionGroupProperty(
+                    action_group_name="GeneralAgentInvoker",
+                    action_group_executor=bedrock.CfnAgent.ActionGroupExecutorProperty(
+                        lambda_=general_router_lambda.function_arn
+                    ),
+                    function_schema=bedrock.CfnAgent.FunctionSchemaProperty(
+                        functions=[
+                            bedrock.CfnAgent.FunctionProperty(
+                                name="invoke_general_agent",
+                                description="Invoke the general advice agent for market information and product details",
+                                parameters={
+                                    "query": bedrock.CfnAgent.ParameterDetailProperty(
+                                        description="The user's query to send to the general agent",
+                                        required=True,
+                                        type="string"
+                                    )
+                                }
+                            )
+                        ]
+                    )
+                )
+            ]
         )
         
-        agent_execution_role.add_to_policy(iam.PolicyStatement(
-            actions=["bedrock:InvokeAgent"],
-            resources=[personalized_agent.attr_agent_arn, general_agent.attr_agent_arn]
-        ))
+        # Grant Lambda functions permission to be invoked by Bedrock
+        personalized_router_lambda.add_permission(
+            "BedrockInvokePermission",
+            principal=iam.ServicePrincipal("bedrock.amazonaws.com"),
+            action="lambda:InvokeFunction"
+        )
+        
+        general_router_lambda.add_permission(
+            "BedrockInvokePermission", 
+            principal=iam.ServicePrincipal("bedrock.amazonaws.com"),
+            action="lambda:InvokeFunction"
+        )
+        
+        # Create agent aliases (required for invocation)
+        personalized_agent_alias = bedrock.CfnAgentAlias(
+            self, "PersonalizedAgentAlias",
+            agent_alias_name="PersonalizedAgentAlias",
+            agent_id=personalized_agent.attr_agent_id
+        )
+        
+        general_agent_alias = bedrock.CfnAgentAlias(
+            self, "GeneralAgentAlias", 
+            agent_alias_name="GeneralAgentAlias",
+            agent_id=general_agent.attr_agent_id
+        )
+        
+        orchestrator_agent_alias = bedrock.CfnAgentAlias(
+            self, "OrchestratorAgentAlias",
+            agent_alias_name="OrchestratorAgentAlias", 
+            agent_id=orchestrator_agent.attr_agent_id
+        )
         
         # --- THE FIX ---
         # Explicitly define the Log Group for the Lambda function to prevent conflicts
@@ -136,7 +251,7 @@ class InvestmentAgentSystemStack(Stack):
             timeout=Duration.seconds(90),
             environment={
                 "ORCHESTRATOR_AGENT_ID": orchestrator_agent.attr_agent_id,
-                "ORCHESTRATOR_AGENT_ALIAS_ID": "PLACEHOLDER"
+                "ORCHESTRATOR_AGENT_ALIAS_ID": orchestrator_agent_alias.attr_agent_alias_id
             },
             # Associate the explicitly created log group
             log_group=invoke_agent_log_group
@@ -148,6 +263,14 @@ class InvestmentAgentSystemStack(Stack):
                 f"arn:aws:bedrock:{self.region}:{self.account}:agent-alias/{orchestrator_agent.attr_agent_id}/*"
             ]
         ))
+
+        # Add outputs for the new agent aliases
+        CfnOutput(self, "PersonalizedAgentId", value=personalized_agent.attr_agent_id)
+        CfnOutput(self, "GeneralAgentId", value=general_agent.attr_agent_id) 
+        CfnOutput(self, "OrchestratorAgentId", value=orchestrator_agent.attr_agent_id)
+        CfnOutput(self, "PersonalizedAgentAliasId", value=personalized_agent_alias.attr_agent_alias_id)
+        CfnOutput(self, "GeneralAgentAliasId", value=general_agent_alias.attr_agent_alias_id)
+        CfnOutput(self, "OrchestratorAgentAliasId", value=orchestrator_agent_alias.attr_agent_alias_id)
 
         # API Gateway with API Key security and logging
         api_log_group = logs.LogGroup(self, "ApiAccessLogs")
