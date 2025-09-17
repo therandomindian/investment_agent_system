@@ -25,7 +25,7 @@ class InvestmentAgentSystemStack(Stack):
         super().__init__(scope, construct_id, **kwargs)
 
         # Hardcoded Knowledge Base ID
-        knowledge_base_id = "2MONVUTDYX"
+        knowledge_base_id = "MECVHJB1T2"
 
         # S3 Bucket for PDS documents
         pds_bucket = s3.Bucket(
@@ -66,6 +66,17 @@ class InvestmentAgentSystemStack(Stack):
             entry="lambda/portfolio_service",
             index="balance_fetcher.py", 
             handler="handler",
+            runtime=_lambda.Runtime.PYTHON_3_11,
+            architecture=Architecture.ARM_64,
+            timeout=Duration.seconds(30),
+        )
+
+        # Subscription Service Lambda
+        subscription_service_lambda = PythonFunction(
+            self, "SubscriptionServiceLambda",
+            entry="lambda/subscription_service",
+            index="subscription_handler.py",
+            handler="handler", 
             runtime=_lambda.Runtime.PYTHON_3_11,
             architecture=Architecture.ARM_64,
             timeout=Duration.seconds(30),
@@ -171,7 +182,63 @@ For non-performance queries, respond normally with helpful portfolio insights an
                 knowledge_base_id=knowledge_base_id,
                 description="Contains Product Disclosure Statements (PDS) for Vanguard Australia products."
             )],
+            action_groups=[
+                bedrock.CfnAgent.AgentActionGroupProperty(
+                    action_group_name="SubscriptionService",
+                    action_group_executor=bedrock.CfnAgent.ActionGroupExecutorProperty(
+                        lambda_=subscription_service_lambda.function_arn
+                    ),
+                    function_schema=bedrock.CfnAgent.FunctionSchemaProperty(
+                        functions=[
+                            bedrock.CfnAgent.FunctionProperty(
+                                name="check_subscription",
+                                description="Check if the user has subscribed to the Vanguard Investment Advice service",
+                                parameters={
+                                    "user_id": bedrock.CfnAgent.ParameterDetailProperty(
+                                        description="The user ID to check subscription for",
+                                        required=False,
+                                        type="string"
+                                    )
+                                }
+                            ),
+                            bedrock.CfnAgent.FunctionProperty(
+                                name="subscribe_to_service", 
+                                description="Subscribe the user to the Vanguard Investment Advice service",
+                                parameters={
+                                    "user_id": bedrock.CfnAgent.ParameterDetailProperty(
+                                        description="The user ID to subscribe",
+                                        required=False,
+                                        type="string"
+                                    ),
+                                    "agent_name": bedrock.CfnAgent.ParameterDetailProperty(
+                                        description="The agent name to subscribe to",
+                                        required=False,
+                                        type="string"
+                                    )
+                                }
+                            )
+                        ]
+                    )
+                )
+            ],
             instruction="""You are an expert financial advisor specializing in detailed investment strategy and analysis. Your role is to provide comprehensive investment advice, cash deployment strategies, and what-if scenario analysis.
+
+**CRITICAL SUBSCRIPTION WORKFLOW:**
+
+**User ID Handling:**
+ALWAYS use "quang" as the user_id when calling subscription functions (check_subscription or subscribe_to_service). NEVER ask the user for their user ID - the system automatically defaults to "quang" for all operations.
+
+**For Subscription Requests:**
+If a user asks to subscribe to the "Vanguard Investment Advice service" or similar subscription requests, use the subscribe_to_service function immediately with user_id="quang" to process their subscription.
+
+**For All Other Queries:**
+BEFORE providing any investment advice, you MUST first check if the user has an active subscription using the check_subscription function with user_id="quang". Based on the subscription status:
+
+1. **If user has NO subscription (permitted_agents is empty):**
+   Respond with: "To access detailed investment advice and personalized recommendations, you need to subscribe to the Vanguard Investment Advice service. This service provides tailored investment strategies based on your profile and market analysis. Would you like me to help you subscribe to this service?"
+
+2. **If user HAS subscription (permitted_agents is not empty):**
+   Proceed with providing detailed investment advice. Begin your response with personalized context like: "Based on profile data shared securely by the system, people in your age range typically prefer [investment strategy]. I recommend..."
 
 **Core Expertise Areas:**
 1. **Cash Investment Strategies:** Provide detailed recommendations on how to deploy available cash across different asset classes, considering risk tolerance, time horizons, and market conditions.
@@ -183,7 +250,8 @@ For non-performance queries, respond normally with helpful portfolio insights an
 4. **Market Analysis:** Provide context on current market conditions and how they might affect investment decisions.
 
 **Key Directives:**
-- Always provide comprehensive, well-reasoned investment analysis
+- Always check subscription status first (except for subscription requests)
+- For subscribed users, provide personalized, comprehensive investment analysis
 - Consider multiple perspectives and risk factors
 - Use data from the knowledge base when discussing specific Vanguard products
 - Provide actionable insights for cash deployment and portfolio optimization
@@ -197,7 +265,8 @@ Every response MUST begin with the following General Advice Warning:
 > The information provided is general in nature and does not take into account your personal objectives, financial situation, or needs. You should consider your own circumstances and whether the information is appropriate for you before making any investment decision. We recommend you seek independent financial advice.
 ---
 
-**Response Guidelines:**
+**Response Guidelines for Subscribed Users:**
+- Start responses with personalized context based on user profile data
 - For cash investment queries, provide specific allocation strategies with rationale
 - For what-if scenarios, analyze multiple potential outcomes with probability assessments where relevant  
 - Include considerations for market timing, dollar-cost averaging, and risk management
@@ -301,16 +370,13 @@ Your advice should be detailed, strategic, and actionable while maintaining comp
             foundation_model="amazon.nova-micro-v1:0",
             instruction="""You are a master financial query orchestrator. Your job is to route queries to the correct specialist agent.
                 
-                You have access to two functions:
+                You have access to three functions:
                 - invoke_personalized_agent: Use this for personal financial questions, account-specific queries, or questions about the user's individual situation
                 - invoke_general_agent: Use this for general market information, product explanations, or educational content about investments
-                
+                - invoke_detailed_investment_agent: Use this for in-depth investment analysis, detailed financial planning, what-if scenarios and what user should do with cash
+
                 Analyze the user's query and determine which agent would be most appropriate. Then call the corresponding function with the user's query.
-                Return only the response from the specialist agent.""",
-            knowledge_bases=[bedrock.CfnAgent.AgentKnowledgeBaseProperty(
-                knowledge_base_id=knowledge_base_id,
-                description="Contains Product Disclosure Statements (PDS) for Vanguard Australia products."
-            )]
+                Return only the response from the specialist agent."""
         )
         
         # Create main agent alias
@@ -378,6 +444,13 @@ Your advice should be detailed, strategic, and actionable while maintaining comp
         # Grant portfolio lambda permission to be invoked by the main agent
         portfolio_balance_lambda.add_permission(
             "MainAgentInvokePermission",
+            principal=iam.ServicePrincipal("bedrock.amazonaws.com"),
+            action="lambda:InvokeFunction"
+        )
+
+        # Grant subscription service lambda permission to be invoked by the detailed investment agent
+        subscription_service_lambda.add_permission(
+            "DetailedAgentInvokePermission",
             principal=iam.ServicePrincipal("bedrock.amazonaws.com"),
             action="lambda:InvokeFunction"
         )
