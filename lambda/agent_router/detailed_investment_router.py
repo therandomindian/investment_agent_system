@@ -1,4 +1,4 @@
-# lambda/agent_router/personalized_router.py
+# lambda/agent_router/detailed_investment_router.py
 
 import json
 import os
@@ -11,7 +11,7 @@ AGENT_ALIAS_ID = os.environ["AGENT_ALIAS_ID"]
 
 def handler(event, context):
     """
-    Lambda function to route queries to the personalized agent
+    Lambda function to route queries to the detailed investment agent
     """
     try:
         print(f"Received event: {json.dumps(event, default=str)}")
@@ -35,10 +35,10 @@ def handler(event, context):
         # Alternative parsing for different event structures
         if not function_name and "inputText" in event:
             # Direct invocation format
-            function_name = "invoke_personalized_agent"
+            function_name = "invoke_detailed_investment_agent"
             parameters = {"query": event.get("inputText", "")}
         
-        if function_name != "invoke_personalized_agent":
+        if function_name != "invoke_detailed_investment_agent":
             return {
                 "messageVersion": "1.0",
                 "response": {
@@ -57,7 +57,7 @@ def handler(event, context):
         query = parameters.get("query", "")
         if not query:
             return {
-                "messageVersion": "1.0", 
+                "messageVersion": "1.0",
                 "response": {
                     "actionGroup": action_group,
                     "function": function_name,
@@ -74,14 +74,7 @@ def handler(event, context):
         # Generate a unique session ID for this conversation
         session_id = str(uuid.uuid4())
         
-        # Debug information
-        print(f"DEBUG: Invoking personalized agent with:")
-        print(f"DEBUG: AGENT_ID = {AGENT_ID}")
-        print(f"DEBUG: AGENT_ALIAS_ID = {AGENT_ALIAS_ID}")
-        print(f"DEBUG: Session ID = {session_id}")
-        print(f"DEBUG: Query = {query}")
-        
-        # Invoke the personalized agent
+        # Invoke the detailed investment agent
         response = bedrock_agent.invoke_agent(
             agentId=AGENT_ID,
             agentAliasId=AGENT_ALIAS_ID,
@@ -91,26 +84,8 @@ def handler(event, context):
         
         completion = ""
         # The response from the agent is a stream of data chunks
-        print(f"DEBUG: Processing response chunks...")
-        chunk_count = 0
         for chunk in response['completion']:
-            chunk_count += 1
-            print(f"DEBUG: Processing chunk {chunk_count}: {type(chunk)}")
-            if 'chunk' in chunk:
-                chunk_data = chunk['chunk']
-                print(f"DEBUG: Chunk data keys: {chunk_data.keys() if isinstance(chunk_data, dict) else 'Not a dict'}")
-                if 'bytes' in chunk_data:
-                    decoded_text = chunk_data['bytes'].decode()
-                    print(f"DEBUG: Decoded chunk text: {decoded_text[:100]}...")  # First 100 chars
-                    completion += decoded_text
-                else:
-                    print(f"DEBUG: No 'bytes' key in chunk data")
-            else:
-                print(f"DEBUG: No 'chunk' key in response item")
-        
-        print(f"DEBUG: Total chunks processed: {chunk_count}")
-        print(f"DEBUG: Final completion length: {len(completion)}")
-        print(f"Personalized agent response: {completion}")
+            completion += chunk['chunk']['bytes'].decode()
         
         return {
             "messageVersion": "1.0",
@@ -128,7 +103,7 @@ def handler(event, context):
         }
         
     except Exception as e:
-        print(f"Error invoking personalized agent: {e}")
+        print(f"Error invoking detailed investment agent: {e}")
         print(f"Event structure: {json.dumps(event, default=str)}")
         return {
             "messageVersion": "1.0",
@@ -138,7 +113,7 @@ def handler(event, context):
                 "functionResponse": {
                     "responseBody": {
                         "TEXT": {
-                            "body": f"Error invoking personalized agent: {str(e)}"
+                            "body": f"Error invoking detailed investment agent: {str(e)}"
                         }
                     }
                 }

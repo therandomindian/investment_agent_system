@@ -6,8 +6,8 @@ import boto3
 import uuid
 
 bedrock_agent = boto3.client("bedrock-agent-runtime")
-ORCHESTRATOR_AGENT_ID = os.environ["ORCHESTRATOR_AGENT_ID"]
-ORCHESTRATOR_AGENT_ALIAS_ID = os.environ["ORCHESTRATOR_AGENT_ALIAS_ID"]
+MAIN_AGENT_ID = os.environ["MAIN_AGENT_ID"]
+MAIN_AGENT_ALIAS_ID = os.environ["MAIN_AGENT_ALIAS_ID"]
 
 def handler(event, context):
     try:
@@ -23,15 +23,15 @@ def handler(event, context):
             }
 
         # Check if the placeholder is still there
-        if "PLACEHOLDER" in ORCHESTRATOR_AGENT_ALIAS_ID:
+        if "PLACEHOLDER" in MAIN_AGENT_ALIAS_ID:
             return {
                 "statusCode": 500,
                 "body": json.dumps({"error": "Server is not configured. Agent Alias ID is a placeholder."})
             }
 
         response = bedrock_agent.invoke_agent(
-            agentId=ORCHESTRATOR_AGENT_ID,
-            agentAliasId=ORCHESTRATOR_AGENT_ALIAS_ID,
+            agentId=MAIN_AGENT_ID,
+            agentAliasId=MAIN_AGENT_ALIAS_ID,
             sessionId=session_id,
             inputText=prompt,
         )
